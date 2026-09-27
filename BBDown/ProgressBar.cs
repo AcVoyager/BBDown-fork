@@ -30,6 +30,14 @@ class ProgressBar : IDisposable, IProgress<double>
 	//服务器模式使用，更新下载任务的进度
 	private DownloadTask? RelatedTask = null;
 
+	// 输出被重定向且设置了环境变量 BBDOWN_PROGRESS_REPORT=1 时,
+	// 每秒输出一行机器可读的进度: "[BBDOWN_PROGRESS] <百分比> <每秒字节数>", 供外部程序(如 BBDownServer)解析
+	private static readonly bool LineReport = Console.IsOutputRedirected
+		&& Environment.GetEnvironmentVariable("BBDOWN_PROGRESS_REPORT") == "1";
+	private const int lineReportEveryTicks = 8; // 动画间隔为1/8秒, 即每秒输出一次
+	private int lineReportTick = 0;
+	private long lastSpeedBytes = 0;
+
 	public ProgressBar(DownloadTask? task = null)
 	{
 		timer = new Timer(TimerHandler);
@@ -41,7 +49,7 @@ class ProgressBar : IDisposable, IProgress<double>
 		// However, if this progressbar is for a server download task,
 		// we still need it to report progress no matter where stdout is redirected.
 		// The prevention of writing garbage should be controlled on the methods do the actual writing.
-		if (!Console.IsOutputRedirected || RelatedTask is not null)
+		if (!Console.IsOutputRedirected || RelatedTask is not null || LineReport)
 		{
 			ResetTimer();
 			ResetSpeedTimer();
@@ -75,11 +83,16 @@ class ProgressBar : IDisposable, IProgress<double>
 				var delta = downloadedBytes - lastDownloadedBytes;
 				speedString = " - " + BBDownUtil.FormatFileSize(delta) + "/s";
 				lastDownloadedBytes = downloadedBytes;
+				Interlocked.Exchange(ref lastSpeedBytes, delta);
 				if (RelatedTask is not null) 
 				{
 					RelatedTask.DownloadSpeed = delta;
 					RelatedTask.TotalDownloadedBytes += delta;
 				}
+			}
+			else
+			{
+				Interlocked.Exchange(ref lastSpeedBytes, 0);
 			}
 
 			ResetSpeedTimer();
@@ -102,6 +115,12 @@ class ProgressBar : IDisposable, IProgress<double>
 			if (RelatedTask is not null) 
 			{
 				RelatedTask.Progress = currentProgress;
+			}
+			if (LineReport && lineReportTick++ % lineReportEveryTicks == 0)
+			{
+				// 单次调用写入整行, 尽量避免与其他日志输出交错
+				Console.Out.Write(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+					$"[BBDOWN_PROGRESS] {percent:0.00} {Interlocked.Read(ref lastSpeedBytes)}{Environment.NewLine}"));
 			}
 
 			ResetTimer();
@@ -153,6 +172,11 @@ class ProgressBar : IDisposable, IProgress<double>
 	{
 		lock (timer)
 		{
+			if (LineReport && !disposed)
+			{
+				Console.Out.Write(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+					$"[BBDOWN_PROGRESS] {currentProgress * 100:0.00} 0{Environment.NewLine}"));
+			}
 			disposed = true;
 			UpdateText(string.Empty);
 		}
